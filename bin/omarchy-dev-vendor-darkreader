@@ -1,0 +1,151 @@
+#!/bin/bash
+
+# omarchy:summary=Vendor and patch the Dark Reader engine that Omareader runs on
+# omarchy:args=[version]
+# omarchy:hidden=true
+
+# Omareader drives page restyling with Dark Reader's dynamic theme engine (MIT).
+# This fetches the published darkreader npm build and the site-fix list from
+# the same release, then applies Omareader's patches:
+#
+#   1. Every background, text, border and shadow color is offered to
+#      globalThis.OmareaderSnap first, so Omarchy's palette mapper picks the
+#      final color. Dark Reader's own color is used when it returns nothing.
+#   2. The palette signature joins Dark Reader's cache keys, and the theme's
+#      colors join the inline-style cache key, so a theme or mode switch never
+#      reuses colors from the old one.
+#   3. The inline <script> that installs the stylesheet proxy is blocked by
+#      page CSPs, so it signals src/vendor/darkreader-proxy.js instead, which
+#      runs in the page's main world.
+#
+# Run it again after bumping the version, then run the Omareader unit tests.
+
+set -euo pipefail
+
+version="${1:-4.9.133}"
+# The commit that the darkreader npm release was published from.
+fixes_commit="${OMAREADER_FIXES_COMMIT:-92637d8c3fbb210853c005e3f25dbbec46dd21fc}"
+vendor_dir="$OMARCHY_PATH/default/chromium/extensions/omareader/src/vendor"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+curl -fsSL "https://registry.npmjs.org/darkreader/-/darkreader-$version.tgz" | tar -xz -C "$work"
+curl -fsSL -o "$work/dynamic-theme-fixes.config" "https://raw.githubusercontent.com/darkreader/darkreader/$fixes_commit/src/config/dynamic-theme-fixes.config"
+
+node - "$work/package/darkreader.js" "$vendor_dir" "$version" <<'EOF'
+const fs = require('fs');
+const path = require('path');
+const [source, out, version] = process.argv.slice(2);
+// The npm build has CRLF line endings.
+let js = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n');
+
+function replaceOnce(from, to, label) {
+  const at = js.indexOf(from);
+  if (at < 0 || js.indexOf(from, at + from.length) >= 0) throw new Error(`Dark Reader ${version}: ${label} not found exactly once`);
+  js = js.slice(0, at) + to + js.slice(at + from.length);
+}
+
+// 1. The palette signature joins the cache keys.
+replaceOnce(
+  '        "lightSchemeTextColor"\n    ];\n    function getCacheId(',
+  '        "lightSchemeTextColor",\n        "omareaderPalette"\n    ];\n' +
+  '    // Omareader: Omarchy\'s palette mapper picks the final color when a palette is set.\n' +
+  '    function omareaderSnap(rgb, theme, role) {\n' +
+  '        const snap = theme.omareaderPalette ? globalThis.OmareaderSnap : null;\n' +
+  '        return typeof snap === "function" ? snap(rgb, role) : null;\n' +
+  '    }\n' +
+  '    function getCacheId(',
+  'theme cache keys',
+);
+
+// Inline styles are keyed by theme too, and upstream leaves the colors out of that key.
+replaceOnce(
+  '    const themeProps = ["brightness", "contrast", "grayscale", "sepia", "mode"];',
+  '    const themeProps = ["brightness", "contrast", "grayscale", "sepia", "mode", "darkSchemeBackgroundColor", "darkSchemeTextColor", "lightSchemeBackgroundColor", "lightSchemeTextColor", "omareaderPalette"];',
+  'inline style theme key',
+);
+
+// 2. Background, text, border and shadow colors go through the mapper first.
+for (const [fn, role] of [['_modifyBackgroundColor', 'bg'], ['_modifyForegroundColor', 'text'], ['_modifyBorderColor', 'border']]) {
+  replaceOnce(
+    `    function ${fn}(rgb, theme) {\n`,
+    `    function ${fn}(rgb, theme) {\n        const omareader = omareaderSnap(rgb, theme, "${role}");\n        if (omareader) {\n            return omareader;\n        }\n`,
+    fn,
+  );
+}
+replaceOnce(
+  '    function modifyShadowColor(rgb, theme) {\n        return modifyBackgroundColor(rgb, theme);',
+  '    function modifyShadowColor(rgb, theme) {\n        const omareader = omareaderSnap(rgb, theme, "shadow");\n        if (omareader) {\n            return omareader;\n        }\n        return modifyBackgroundColor(rgb, theme);',
+  'modifyShadowColor',
+);
+
+// 3. Signal the main-world proxy instead of inserting an inline script.
+const proxyStart = 'const proxyScript = createOrUpdateScript("darkreader--proxy");';
+const proxyEnd = 'proxyScript.remove();';
+const start = js.indexOf(proxyStart);
+const end = start < 0 ? -1 : js.indexOf(proxyEnd, start);
+if (end < 0) throw new Error(`Dark Reader ${version}: inline proxy not found`);
+js = js.slice(0, start) +
+  'const proxyRoot = document.documentElement;\n' +
+  '        if (proxyRoot) {\n' +
+  '            proxyRoot.setAttribute("data-omareader-proxy", JSON.stringify([enableStyleSheetsProxy, enableCustomElementRegistryProxy]));\n' +
+  '            document.dispatchEvent(new CustomEvent("omareader:proxy"));\n' +
+  '        }' +
+  js.slice(end + proxyEnd.length);
+
+// The proxy's own source, for the main-world script.
+const sig = js.indexOf('    function injectProxy(');
+let depth = 0, i = js.indexOf('{', js.indexOf(')', sig));
+for (; i < js.length; i++) {
+  if (js[i] === '{') depth++;
+  else if (js[i] === '}' && --depth === 0) break;
+}
+if (sig < 0 || depth !== 0) throw new Error(`Dark Reader ${version}: injectProxy not found`);
+const inject = js.slice(sig, i + 1).replace(/^    /gm, '');
+
+const header = `/* Dark Reader ${version} (https://github.com/darkreader/darkreader), MIT, see LICENSE-darkreader.\n * Patched by bin/omarchy-dev-vendor-darkreader. Do not edit by hand. */\n`;
+fs.writeFileSync(path.join(out, 'darkreader.js'), header + js);
+fs.writeFileSync(path.join(out, 'darkreader-proxy.js'), `${header}// Main world. Installs Dark Reader's stylesheet and custom element proxy when the
+// isolated-world engine asks for it through the data-omareader-proxy attribute.
+(() => {
+  'use strict';
+  if (globalThis.__omareaderProxy) return;
+  globalThis.__omareaderProxy = true;
+
+${inject.replace(/^/gm, '  ').replace(/^ +$/gm, '')}
+
+  const Observer = MutationObserver;
+  function install() {
+    const root = document.documentElement;
+    const raw = root && root.getAttribute('data-omareader-proxy');
+    if (raw == null) return;
+    root.removeAttribute('data-omareader-proxy');
+    let flags;
+    try {
+      flags = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (Array.isArray(flags) && flags.length === 2 && flags.every((f) => typeof f === 'boolean')) injectProxy(flags[0], flags[1]);
+  }
+  function arm(root) {
+    install();
+    new Observer(install).observe(root, { attributes: true, attributeFilter: ['data-omareader-proxy'] });
+  }
+  document.addEventListener('omareader:proxy', install);
+  if (document.documentElement) arm(document.documentElement);
+  else {
+    const waiting = new Observer(() => {
+      if (!document.documentElement) return;
+      waiting.disconnect();
+      arm(document.documentElement);
+    });
+    waiting.observe(document, { childList: true });
+  }
+})();
+`);
+EOF
+
+cp "$work/package/LICENSE" "$vendor_dir/LICENSE-darkreader"
+cp "$work/dynamic-theme-fixes.config" "$vendor_dir/dynamic-theme-fixes.config"
+echo "Vendored Dark Reader $version into $vendor_dir"
