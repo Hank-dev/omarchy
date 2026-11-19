@@ -7,24 +7,31 @@
 </head>
 <body>
   <header>
-    <img src="../icons/omarchy-32.png" width="20" height="20" alt="">
-    <strong>Omareader</strong>
+    <img id="logo" src="../icons/omareader-dark.svg" width="30" height="30" alt="">
+    <h1>omareader</h1>
   </header>
   <section>
-    <div class="label">All sites</div>
-    <div class="modes" id="modes" role="radiogroup" aria-label="Mode for all sites">
+    <p class="label"><span>All sites</span><span class="keys" title="Alt+Shift+U turns every site Normal and back">alt+shift+u</span></p>
+    <div class="modes" id="modes" role="radiogroup" aria-label="Mode for all sites" aria-keyshortcuts="Alt+Shift+U">
       <button type="button" role="radio" data-mode="normal" title="Pages as they are">Normal</button>
       <button type="button" role="radio" data-mode="dark" title="Pitch black, page colors keep their hue">Dark</button>
       <button type="button" role="radio" data-mode="omarchy" title="Follow your current Omarchy theme">Follow Omarchy</button>
     </div>
-    <div class="label site" id="site">—</div>
-    <div class="modes" id="siteModes" role="radiogroup" aria-label="Mode on this site" title="Alt+Shift+O toggles this site off and back">
+    <p class="label"><span id="site">—</span><span class="keys" id="siteKeys" title="Alt+Shift+O turns this site Normal and back">alt+shift+o</span></p>
+    <div class="modes" id="siteModes" role="radiogroup" aria-label="Mode on this site" aria-keyshortcuts="Alt+Shift+O">
       <button type="button" role="radio" data-mode="default">Default</button>
       <button type="button" role="radio" data-mode="normal" title="Always as it is">Normal</button>
       <button type="button" role="radio" data-mode="dark" title="Always pitch black">Dark</button>
       <button type="button" role="radio" data-mode="omarchy" title="Always follow your Omarchy theme">Omarchy</button>
     </div>
     <div id="swatches" class="swatches" aria-hidden="true"></div>
+  </section>
+  <section id="darkReader" hidden>
+    <p id="darkReaderText">Dark Reader is also on. Both extensions restyle the page. Turn Dark Reader off?</p>
+    <div class="choices">
+      <button id="darkReaderOff" type="button">Turn it off</button>
+      <button id="darkReaderKeep" type="button">Leave it on</button>
+    </div>
   </section>
   <footer id="status"></footer>
   <script src="../src/color.js"></script>
