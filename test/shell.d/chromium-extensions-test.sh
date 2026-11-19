@@ -208,8 +208,8 @@ fi
 
 # --- Omareader ---
 
-# Color parsing, palette mapping and CSS value rewriting are pure functions the
-# content script and popup share.
+# Color parsing, palette mapping, settings, site fixes and contrast repair are
+# pure functions the content script, worker and popup share.
 if command -v node >/dev/null; then
   if output=$(node --test "$SHELL_TEST_DIR/omareader/unit.test.cjs" 2>&1); then
     pass "Omareader maps page colors onto the Omarchy palette"
@@ -227,7 +227,14 @@ mkdir -p "$omareader_home/.local/state/omarchy/current/theme" "$omareader_home/.
 cp "$ROOT/themes/catppuccin-latte/colors.toml" "$omareader_home/.local/state/omarchy/current/theme/"
 echo "catppuccin-latte" >"$omareader_home/.local/state/omarchy/current/theme.name"
 printf 'background = "#123456"\nforeground = "#abcdef"\n' >"$omareader_home/.config/omarchy/themes/catppuccin/colors.toml"
-dump=$(env -i HOME="$omareader_home" PATH=/usr/bin "$ROOT/bin/omarchy-chromium-omareader-host" --dump) ||
+# fc-match answers from the fonts.conf that omarchy-font-set writes, so a font
+# change is a write to the watched fontconfig dir, as it is for real.
+omareader_bin="$test_tmp/omareader-bin"
+mkdir -p "$omareader_bin" "$omareader_home/.config/fontconfig"
+printf '#!/bin/bash\ncat "$HOME/.config/fontconfig/fonts.conf"\n' >"$omareader_bin/fc-match"
+chmod +x "$omareader_bin/fc-match"
+echo "JetBrainsMono Nerd Font,JetBrainsMono NF" >"$omareader_home/.config/fontconfig/fonts.conf"
+dump=$(env -i HOME="$omareader_home" PATH="$omareader_bin:/usr/bin" "$ROOT/bin/omarchy-chromium-omareader-host" --dump) ||
   fail "Omareader host dumps the palette"
 [[ $(jq -r '.current.name + " " + .current.colors.mode' <<<"$dump") == "catppuccin-latte light" ]] ||
   fail "Omareader host reads the current theme from the state dir" "$(jq -c .current <<<"$dump")"
@@ -235,6 +242,8 @@ dump=$(env -i HOME="$omareader_home" PATH=/usr/bin "$ROOT/bin/omarchy-chromium-o
   fail "Omareader host lets a user theme override the shipped one"
 [[ $(jq -r '.themes["tokyo-night"].background' <<<"$dump") != null ]] ||
   fail "Omareader host finds the shipped themes without OMARCHY_PATH"
+[[ $(jq -r '.font' <<<"$dump") == "JetBrainsMono Nerd Font" ]] ||
+  fail "Omareader host reports the Omarchy monospace font" "$(jq -c .font <<<"$dump")"
 pass "Omareader host streams the current Omarchy palette"
 
 # A theme switch reaches the extension without polling: the host watches the
@@ -242,7 +251,7 @@ pass "Omareader host streams the current Omarchy palette"
 # theme in and written its name.
 if command -v inotifywait >/dev/null; then
   mkfifo "$test_tmp/omareader-in"
-  env -i HOME="$omareader_home" PATH=/usr/bin "$ROOT/bin/omarchy-chromium-omareader-host" \
+  env -i HOME="$omareader_home" PATH="$omareader_bin:/usr/bin" "$ROOT/bin/omarchy-chromium-omareader-host" \
     <"$test_tmp/omareader-in" >"$test_tmp/omareader-out" &
   omareader_host=$!
   exec {omareader_in}>"$test_tmp/omareader-in"
@@ -264,9 +273,16 @@ if command -v inotifywait >/dev/null; then
   done
   grep -aq '"name":"gruvbox"' "$test_tmp/omareader-out" || fail "Omareader host pushes the palette after a theme switch"
 
+  echo "Iosevka" >"$omareader_home/.config/fontconfig/fonts.conf"
+  for _ in {1..50}; do
+    grep -aq '"font":"Iosevka"' "$test_tmp/omareader-out" && break
+    sleep 0.1
+  done
+  grep -aq '"font":"Iosevka"' "$test_tmp/omareader-out" || fail "Omareader host pushes the font after omarchy-font-set"
+
   exec {omareader_in}>&-
   wait "$omareader_host" || fail "Omareader host exits when the browser closes the port"
-  pass "Omareader host pushes theme switches to the extension"
+  pass "Omareader host pushes theme and font switches to the extension"
 else
   skip "inotifywait is not installed; skipping the Omareader live switch check"
 fi

@@ -13,9 +13,16 @@ const pretty = (name) =>
 let settings = T.normalizeSettings();
 let hostname = '';
 
+// The user's Omarchy monospace font, as the native host reports it, then the browser's.
+function fontStack(family) {
+  return typeof family === 'string' && /^[\p{L}\p{N} ._+-]{1,100}$/u.test(family) ? `"${family}", monospace` : 'monospace';
+}
+
 function paint(palette) {
   const m = T.createMapper(palette);
   const root = document.documentElement.style;
+  // Light glasses on a light theme, dark glasses otherwise.
+  $('logo').src = `../icons/omareader-${palette.mode === 'light' ? 'light' : 'dark'}.svg`;
   root.setProperty('--bg', palette.bg);
   root.setProperty('--fg', palette.fg);
   root.setProperty('--accent', palette.accent);
@@ -43,7 +50,7 @@ const check = (group, mode) => {
 };
 
 async function render() {
-  const st = await chrome.storage.local.get(['settings', 'active', 'omarchy', 'host']);
+  const st = await chrome.storage.local.get(['settings', 'active', 'omarchy', 'host', 'font', 'darkReader']);
   settings = T.normalizeSettings(st.settings);
   const current = st.omarchy;
   // What the current tab shows: its own override, else the default.
@@ -53,6 +60,9 @@ async function render() {
   check($('modes'), settings.mode);
   check($('siteModes'), own || 'default');
   $('site').textContent = hostname ? T.siteKey(hostname) : 'Not available on this page';
+  $('siteKeys').hidden = !hostname;
+  document.documentElement.style.setProperty('--font', fontStack(st.font));
+  $('darkReader').hidden = st.darkReader !== 'seen';
   for (const b of $('siteModes').querySelectorAll('button')) b.disabled = !hostname;
   const def = $('siteModes').querySelector('[data-mode="default"]');
   def.title = `Use the mode for all sites (${LABELS[settings.mode]})`;
@@ -66,6 +76,8 @@ async function render() {
     status.textContent = 'Pages shown as they are';
   } else if (mode === 'dark') {
     status.textContent = 'Pitch black · page hues kept';
+  } else if (declined) {
+    status.textContent = 'Turn Dark Reader off in chrome://extensions';
   } else if (st.host && st.host.connected) {
     status.textContent = `Live sync · ${pretty(current && current.name)}`;
   } else {
@@ -94,11 +106,24 @@ function radioGroup(group, selected, pick) {
 }
 
 radioGroup($('modes'), () => settings.mode, async (mode) => {
-  settings = { ...settings, mode };
+  settings = T.withMode(settings, mode);
 });
 radioGroup($('siteModes'), () => (hostname && settings.sites[T.siteKey(hostname)]) || 'default', async (mode) => {
   if (hostname) settings = T.withSiteMode(settings, hostname, mode);
 });
+
+let declined = false;
+$('darkReaderOff').onclick = async () => {
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ permissions: ['management'] });
+  } catch {}
+  if (!granted || !(await chrome.runtime.sendMessage({ type: 'dark-reader-off' }))) {
+    declined = true;
+    await chrome.storage.local.set({ darkReader: 'kept' });
+  }
+};
+$('darkReaderKeep').onclick = () => chrome.storage.local.set({ darkReader: 'kept' });
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local') render();

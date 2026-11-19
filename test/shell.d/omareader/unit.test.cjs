@@ -2,96 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-for (const f of ['color.js', 'theme.js', 'transform.js', 'net.js']) require(path.join(__dirname, '../../../default/chromium/extensions/omareader/src', f));
+for (const f of ['color.js', 'theme.js', 'net.js', 'contrast.js', 'site-fixes.js']) require(path.join(__dirname, '../../../default/chromium/extensions/omareader/src', f));
 const C = globalThis.OmareaderColor;
 const T = globalThis.OmareaderTheme;
-const X = globalThis.OmareaderTransform;
-
-// Run the cache's real lifecycle code with CSSOM-shaped sources. No DOM paint
-// stubs are involved: these checks concern which fetched resources stay owned.
-function remoteCacheHarness() {
-  const fs = require('node:fs');
-  const vm = require('node:vm');
-  const source = fs.readFileSync(path.join(__dirname, '../../../default/chromium/extensions/omareader/src/content.js'), 'utf8');
-  const names = ['readRules', 'splitImports', 'fetchRemote', 'pruneRemote'];
-  const functions = names.map((name) => {
-    const match = source.match(new RegExp(`  (?:async )?function ${name}\\([^]*?\\n  \\}`));
-    assert.ok(match, `${name} is available for the cache lifecycle check`);
-    return match[0];
-  });
-  class CSSImportRule {
-    constructor(styleSheet) { this.styleSheet = styleSheet; this.href = styleSheet.href; }
-  }
-  class CSSLayerStatementRule {}
-  class CSSStyleSheet {
-    replaceSync(text) { this.text = text; this.cssRules = []; }
-  }
-  const doc = { styleSheets: [], adoptedStyleSheets: [] };
-  const context = vm.createContext({
-    doc, scopes: new Map([[doc, {}]]), remote: new Map(), remoteText: new WeakMap(),
-    CSSImportRule, CSSLayerStatementRule, CSSStyleSheet, URL,
-    isOurs: (sheet) => !!sheet.ours,
-    running: true, remoteVersion: 0, scans: 0,
-    scheduleScan() { context.scans++; },
-    // Also let the old budget-only implementation run: small leaks must be freed too.
-    remoteBytes: 0, REMOTE_BUDGET: 16 * 1024 * 1024, REMOTE_IDLE_MS: 60000,
-    performance: { now: () => 0 },
-    chrome: { runtime: {} },
-  });
-  vm.runInContext(functions.join('\n') + '\nObject.assign(globalThis, { fetchRemote, pruneRemote });', context);
-  context.crossOrigin = (href) => ({ href, get cssRules() { throw new Error('SecurityError'); } });
-  return context;
-}
-
-test('remote sheets are released when no live document, import or shadow root uses them', () => {
-  const c = remoteCacheHarness();
-  const main = c.crossOrigin('https://cdn.test/main.css');
-  const shared = c.crossOrigin('https://cdn.test/shared.css');
-  const pending = c.crossOrigin('https://cdn.test/pending.css');
-  const shadow = { host: { isConnected: true }, styleSheets: [shared], adoptedStyleSheets: [] };
-  c.scopes.set(shadow, {});
-  c.doc.styleSheets = [main];
-  c.doc.adoptedStyleSheets = [{ cssRules: [new c.CSSLayerStatementRule(), new c.CSSImportRule(pending)] }];
-  c.remote.set(main.href, { state: 'done', imports: [{ url: shared.href }, { url: main.href }] });
-  c.remote.set(shared.href, { state: 'done', imports: [] });
-  c.remote.set(pending.href, { state: 'pending' });
-  for (const state of ['done', 'pending', 'failed']) c.remote.set(`https://cdn.test/removed-${state}.css`, { state, imports: [] });
-  c.pruneRemote();
-  assert.deepEqual([...c.remote.keys()].sort(), [main.href, shared.href, pending.href].sort());
-  c.doc.styleSheets = [];
-  c.doc.adoptedStyleSheets = [];
-  c.pruneRemote();
-  assert.deepEqual([...c.remote.keys()], [shared.href], 'a shared sheet survives while a connected shadow root uses it');
-  shadow.host.isConnected = false;
-  c.pruneRemote();
-  assert.equal(c.remote.size, 0, 'detached shadow roots do not keep fetched sheets alive');
-});
-
-test('late stylesheet fetches cannot restore removed entries or replace a newer fetch', async () => {
-  const c = remoteCacheHarness();
-  const href = 'https://cdn.test/slow.css';
-  c.doc.styleSheets = [c.crossOrigin(href)];
-  for (const fail of [false, true]) {
-    let resolve, reject;
-    c.chrome.runtime.sendMessage = () => new Promise((yes, no) => { resolve = yes; reject = no; });
-    const pending = { state: 'pending' };
-    c.remote.set(href, pending);
-    const fetch = c.fetchRemote(href, pending);
-    c.remote.delete(href);
-    const replacement = { state: 'pending' };
-    c.remote.set(href, replacement);
-    if (fail) reject(new Error('old request failed'));
-    else resolve({ ok: true, text: 'body{color:white}' });
-    await fetch;
-    assert.equal(c.remote.get(href), replacement, 'an obsolete response leaves the replacement request alone');
-  }
-  assert.equal(c.scans, 0, 'obsolete requests do not trigger renders');
-  c.chrome.runtime.sendMessage = async () => ({ ok: true, text: 'body{color:white}' });
-  const pending = c.remote.get(href);
-  await c.fetchRemote(href, pending);
-  assert.equal(c.remote.get(href).state, 'done', 'a current request still populates the cache');
-  assert.equal(c.scans, 1);
-});
+const K = globalThis.OmareaderContrast;
+const F = globalThis.OmareaderSiteFixes;
 
 // Every theme Omarchy ships, read by the native host itself so the tests see what the
 // extension gets. An empty HOME keeps the user's own themes out.
@@ -227,66 +142,6 @@ test('alpha is preserved and shadows stay dark', () => {
   assert.ok(C.toOklab(hover).L > 0.8, 'faint black hover tint on a light page lightens on dark');
 });
 
-function ctx(palette = LIFTOFF) {
-  return { mapper: T.createMapper(T.normalize(palette)), values: new Map(), base: 'https://example.com/css/site.css' };
-}
-
-test('transformValue rewrites colors inside arbitrary values', () => {
-  const c = ctx();
-  assert.equal(X.transformValue('#fff', 'bg', c), '#151e26');
-  assert.equal(X.transformValue('white', 'bg', c), '#151e26');
-  assert.equal(X.transformValue('1px solid transparent', 'border', c), '1px solid transparent');
-  assert.equal(X.transformValue('currentColor', 'text', c), 'currentColor');
-  assert.match(X.transformValue('linear-gradient(to right, #fff 0%, rgb(240, 240, 240) 100%)', 'bg', c), /^linear-gradient\(to right, #[0-9a-f]{6} 0%, #[0-9a-f]{6} 100%\)$/);
-  assert.equal(X.transformValue('0 1px 2px rgba(0, 0, 0, 0.2)', 'shadow', c).startsWith('0 1px 2px rgba('), true);
-  assert.equal(X.transformValue('url(img/a.png) no-repeat', 'bg', c), 'url("https://example.com/css/img/a.png") no-repeat');
-  assert.equal(X.transformValue('url("data:image/svg+xml;utf8,<svg fill=\'red\'/>")', 'bg', c), 'url("data:image/svg+xml;utf8,<svg fill=\'red\'/>")');
-  assert.equal(X.transformValue('"white"', 'text', c), '"white"');
-  assert.equal(X.transformValue('#abcdeg', 'text', c), '#abcdeg');
-});
-
-test('variables are renamed per role with the original as fallback', () => {
-  const c = ctx();
-  assert.equal(X.transformValue('var(--bg)', 'bg', c), 'var(--omareader-bg--bg, var(--bg))');
-  assert.equal(X.transformValue('var(--fg, #000)', 'text', c), 'var(--omareader-text--fg, var(--fg, #ece5d8))');
-  assert.equal(X.transformValue('hsl(var(--background))', 'bg', c), 'hsl(var(--omareader-bg--background, var(--background)))');
-  assert.equal(
-    X.transformValue('rgb(255 255 255 / var(--tw-bg-opacity))', 'bg', c),
-    'rgb(21 30 38 / var(--omareader-bg--tw-bg-opacity, var(--tw-bg-opacity)))',
-  );
-  assert.equal(
-    X.transformValue('rgba(255,255,255,var(--a))', 'bg', c),
-    'rgb(21 30 38 / var(--omareader-bg--a, var(--a)))',
-  );
-  assert.match(X.transformValue('color-mix(in srgb, white 50%, var(--x))', 'bg', c), /^color-mix\(in srgb, #151e26 50%, var\(--omareader-bg--x, var\(--x\)\)\)$/);
-});
-
-test('typed custom properties cover full colors, rgb triples and hsl triples', () => {
-  const c = ctx();
-  const plain = Object.fromEntries(X.typedVars('--surface', '#ffffff', c));
-  assert.equal(plain['--omareader-bg--surface'], '#151e26');
-  assert.equal(plain['--omareader-text--surface'], '#ece5d8');
-  const rgb = Object.fromEntries(X.typedVars('--bs-body-bg-rgb', '255, 255, 255', c));
-  assert.equal(rgb['--omareader-bg--bs-body-bg-rgb'], '21, 30, 38');
-  const hsl = Object.fromEntries(X.typedVars('--background', '0 0% 100%', c));
-  assert.match(hsl['--omareader-bg--background'], /^[\d.]+ [\d.]+% [\d.]+%$/);
-  assert.equal(hex(C.parse(`hsl(${hsl['--omareader-bg--background']})`)), '#151e26');
-  assert.equal(Object.fromEntries(X.typedVars('--radius', '4px', c))['--omareader-bg--radius'], '4px');
-  const alias = Object.fromEntries(X.typedVars('--link', 'var(--blue)', c));
-  assert.equal(alias['--omareader-text--link'], 'var(--omareader-text--blue, var(--blue))');
-});
-
-test('roles', () => {
-  assert.equal(X.roleOf('background-color'), 'bg');
-  assert.equal(X.roleOf('border-top-color'), 'border');
-  assert.equal(X.roleOf('border-inline-start-color'), 'border');
-  assert.equal(X.roleOf('outline-color'), 'border');
-  assert.equal(X.roleOf('fill'), 'text');
-  assert.equal(X.roleOf('box-shadow'), 'shadow');
-  assert.equal(X.roleOf('border-radius'), null);
-  assert.equal(X.roleOf('width'), null);
-});
-
 test('every installed Omarchy theme yields a readable mapping', () => {
   for (const [name, raw] of Object.entries(shippedThemes())) {
     const p = T.normalize(raw);
@@ -306,37 +161,6 @@ test('legacy HTML color parsing', () => {
   assert.equal(hex(C.parseLegacy('red')), '#ff0000');
   assert.equal(C.parseLegacy('transparent'), null);
   assert.equal(C.parseLegacy(''), null);
-});
-
-test('ring shadows map as borders, soft shadows stay dark', () => {
-  const c = ctx();
-  const ring = C.parse(X.transformValue('0 0 0 3px #0969da', 'shadow', c).match(/#[0-9a-f]{6}/)[0]);
-  assert.ok(C.contrast(ring, C.parse('#151e26')) >= 2.9, 'focus ring keeps 3:1');
-  const soft = X.transformValue('0 1px 3px rgba(0, 0, 0, 0.2)', 'shadow', c);
-  assert.ok(C.toOklab(C.parse(soft.match(/rgba\([^)]*\)/)[0])).L < 0.25);
-  assert.match(X.transformValue('0 1px 2px #000, 0 0 0 1px #d0d7de', 'shadow', c), /^0 1px 2px #[0-9a-f]{6},\s?0 0 0 1px #[0-9a-f]{6}$/);
-});
-
-test('keyword redeclarations produce typed copies', () => {
-  const c = ctx();
-  assert.deepEqual(Object.fromEntries(X.typedVars('--btnbg', 'transparent', c)), {
-    '--omareader-bg--btnbg': 'transparent', '--omareader-text--btnbg': 'transparent',
-    '--omareader-border--btnbg': 'transparent', '--omareader-shadow--btnbg': 'transparent',
-  });
-});
-
-test('@property typed copies mirror inheritance and map initial values', () => {
-  const c = ctx();
-  const css = X.propertyRules({ name: '--pc', syntax: '<color>', inherits: false, initialValue: '#ffffff' }, c);
-  assert.match(css, /@property --omareader-text--pc\{syntax:"<color>";inherits:false;initial-value:#ece5d8;\}/);
-  assert.equal(X.propertyRules({ name: '--w', syntax: '<length>', inherits: true, initialValue: '1px' }, c), '');
-});
-
-test('raw declaration scan recovers var() shorthands', () => {
-  const r = X.scanRawDecls('/* x */ .hero { background: var(--h) url("a;b.png") no-repeat; background-size: 10px } @media (x) { .a { border: var(--w) solid var(--c) !important } }');
-  assert.equal(r[0].selector, '.hero');
-  assert.deepEqual(r[0].decls[0], { prop: 'background', value: 'var(--h) url("a;b.png") no-repeat', important: false });
-  assert.deepEqual(r[1].decls[0], { prop: 'border', value: 'var(--w) solid var(--c)', important: true });
 });
 
 test('text keeps its contrast class on every installed theme', () => {
@@ -412,4 +236,31 @@ test('Dark mode is neutral and keeps each page color\'s own hue', () => {
     assert.ok(d < 15, `${src} hue drifted ${d.toFixed(1)}°`);
     assert.ok(C.contrast(out, C.parse('#000000')) >= 4.4, `${src} readable`);
   }
+});
+
+test('the all-sites shortcut turns every site Normal and back to the last themed mode', () => {
+  let s = T.withMode(undefined, 'dark');
+  s = T.toggleAll(s);
+  assert.equal(s.mode, 'normal');
+  assert.equal(T.toggleAll(s).mode, 'dark');
+  assert.equal(T.toggleAll(T.normalizeSettings({ mode: 'normal' })).mode, 'omarchy', 'a fresh Normal install goes to Follow Omarchy');
+  assert.equal(T.withMode(T.withMode(undefined, 'omarchy'), 'normal').lastMode, 'omarchy');
+});
+
+test('site fixes pick the common block plus the most specific match', () => {
+  const fs = require('node:fs');
+  const text = fs.readFileSync(path.join(__dirname, '../../../default/chromium/extensions/omareader/src/vendor/dynamic-theme-fixes.config'), 'utf8');
+  const sites = F.acceptSiteFixes(text);
+  const common = F.fixesFor('https://no-fix.invalid/', sites);
+  const github = F.fixesFor('https://github.com/omacom/omarchy', sites);
+  assert.ok(github.css.length > common.css.length, 'github.com gets its own fix on top of the common one');
+  assert.ok(github.css.startsWith(common.css), 'the common block comes first');
+  assert.throws(() => F.acceptSiteFixes('example.com\n\nCSS\nbody {}'), /common block/);
+});
+
+test('poles stay readable and site-fix colors that would vanish take the foreground', () => {
+  const poles = K.readablePoles('#1a1b26', '#2a2b36');
+  assert.ok(C.contrast(C.parse(poles.foreground), C.parse('#1a1b26')) >= 7);
+  assert.equal(K.readablePoles('#1a1b26', '#c0caf5').foreground, '#c0caf5');
+  assert.equal(K.repairFixColors('.a { color: #111 } .b { color: #fff }', '#000000', '#e6e6e6'), '.a { color: #e6e6e6 } .b { color: #fff }');
 });
