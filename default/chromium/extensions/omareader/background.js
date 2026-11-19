@@ -1,10 +1,10 @@
 // Service worker: keeps the native-host connection to Omarchy, resolves the active palette
-// into storage for the content scripts and fetches cross-origin CSS.
-importScripts('src/color.js', 'src/theme.js', 'src/net.js');
+// into storage for the content scripts, fetches cross-origin CSS and hands out site fixes.
+importScripts('src/color.js', 'src/theme.js', 'src/net.js', 'src/site-fixes.js');
 
 async function setToolbarIcon() {
   try {
-    await chrome.action.setIcon({ path: { 16: 'icons/omarchy-16.png', 32: 'icons/omarchy-32.png' } });
+    await chrome.action.setIcon({ path: { 16: 'icons/omareader-dark-16.png', 32: 'icons/omareader-dark-32.png' } });
     await chrome.action.setTitle({ title: 'Omareader' });
   } catch (error) {
     console.warn('Omareader could not load its toolbar icon:', error);
@@ -48,7 +48,12 @@ function connect() {
   }
   port.onMessage.addListener((msg) => {
     if (!msg || msg.type !== 'state') return;
-    chrome.storage.local.set({ omarchy: msg.current, themes: msg.themes, host: { connected: true, error: null } });
+    chrome.storage.local.set({
+      omarchy: msg.current,
+      themes: msg.themes,
+      font: typeof msg.font === 'string' ? msg.font : null,
+      host: { connected: true, error: null },
+    });
   });
   port.onDisconnect.addListener(() => {
     const err = chrome.runtime.lastError && chrome.runtime.lastError.message;
@@ -143,6 +148,27 @@ async function fetchCss(url, sender) {
   return res;
 }
 
+// Dark Reader's per-site corrections, bundled with the engine they were written for.
+let siteFixes = null;
+async function fixFor(url) {
+  if (!siteFixes) {
+    siteFixes = fetch(chrome.runtime.getURL('src/vendor/dynamic-theme-fixes.config'))
+      .then((res) => res.text())
+      .then((text) => OmareaderSiteFixes.acceptSiteFixes(text))
+      .catch((e) => {
+        console.warn('Omareader could not read its site fixes:', e);
+        return [];
+      });
+  }
+  return OmareaderSiteFixes.fixesFor(url, await siteFixes);
+}
+
+// The Dark Reader extension is theming pages too. The popup offers to turn it off once.
+async function darkReaderSeen() {
+  const { darkReader } = await chrome.storage.local.get('darkReader');
+  if (!darkReader) await chrome.storage.local.set({ darkReader: 'seen' });
+}
+
 async function toggleSite(hostname) {
   if (!hostname) return;
   const { settings } = await chrome.storage.local.get('settings');
@@ -153,9 +179,9 @@ async function injectIntoOpenTabs() {
   const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
   for (const tab of tabs) {
     const target = { tabId: tab.id, allFrames: true };
-    chrome.scripting.executeScript({ target, files: ['src/page-hook.js'], world: 'MAIN' }).catch(() => {});
+    chrome.scripting.executeScript({ target, files: ['src/vendor/darkreader-proxy.js'], world: 'MAIN' }).catch(() => {});
     chrome.scripting
-      .executeScript({ target, files: ['src/color.js', 'src/theme.js', 'src/transform.js', 'src/content.js'] })
+      .executeScript({ target, files: ['src/color.js', 'src/theme.js', 'src/contrast.js', 'src/vendor/darkreader.js', 'src/content.js'] })
       .catch(() => {});
   }
 }
@@ -164,13 +190,33 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && (changes.settings || changes.omarchy || changes.themes)) queueRecompute();
 });
 
+// Content scripts ask over a port per question: Dark Reader wraps sendMessage in the page's
+// isolated world and drops its replies.
+const PORT_QUESTIONS = {
+  'get-state': () => queueRecompute(),
+  'fetch-css': (msg, sender) => fetchCss(String(msg && msg.url), sender),
+  'site-fix': async (msg, sender) => (sender.tab ? { fix: await fixFor(String(msg && msg.url)) } : null),
+  'dark-reader-seen': (_msg, sender) => (sender.tab ? darkReaderSeen() : null),
+};
+
+chrome.runtime.onConnect.addListener((port) => {
+  const answer = PORT_QUESTIONS[port.name];
+  if (!answer || port.sender.id !== chrome.runtime.id) return;
+  port.onMessage.addListener(async (msg) => {
+    const reply = await Promise.resolve(answer(msg, port.sender)).catch((e) => ({ ok: false, error: String(e) }));
+    try {
+      port.postMessage(reply === undefined ? null : reply);
+    } catch {}
+  });
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'get-state') {
     queueRecompute().then(sendResponse);
     return true;
   }
-  if (msg.type === 'fetch-css') {
-    fetchCss(String(msg.url), _sender).then(sendResponse);
+  if (msg.type === 'dark-reader-off') {
+    turnOffDarkReader().then(sendResponse);
     return true;
   }
   if (msg.type === 'reconnect') {
@@ -182,13 +228,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
+// The Dark Reader extension's id in the Chrome Web Store.
+const DARK_READER_ID = 'eimadpbcbfnmbkopoojfekhnkhdbieeh';
+
+// The popup asks for the optional management permission first; without it the user is
+// told where to turn Dark Reader off instead.
+async function turnOffDarkReader() {
+  try {
+    if (!chrome.management) return false;
+    await chrome.management.setEnabled(DARK_READER_ID, false);
+    await chrome.storage.local.set({ darkReader: 'off' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const GLOBAL_MODE_COMMANDS = { 'mode-normal': 'normal', 'mode-dark': 'dark', 'mode-omarchy': 'omarchy' };
 
 chrome.commands.onCommand.addListener(async (command, tab) => {
-  if (GLOBAL_MODE_COMMANDS[command]) {
+  if (GLOBAL_MODE_COMMANDS[command] || command === 'toggle-all') {
     const { settings } = await chrome.storage.local.get('settings');
     await chrome.storage.local.set({
-      settings: { ...OmareaderTheme.normalizeSettings(settings), mode: GLOBAL_MODE_COMMANDS[command] },
+      settings: command === 'toggle-all'
+        ? OmareaderTheme.toggleAll(settings)
+        : OmareaderTheme.withMode(settings, GLOBAL_MODE_COMMANDS[command]),
     });
     return;
   }

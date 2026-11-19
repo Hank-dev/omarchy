@@ -36,7 +36,9 @@ These are Chromium-family only. Firefox and Zen don't get them.
 - **Dark** gives every page a pitch-black background and keeps the page's own colors for links and highlights.
 - **Follow Omarchy** paints pages in your current theme: backgrounds and text take the theme's colors, links its blue, errors its red. Light themes keep pages light. Switch your theme and open tabs repaint within about a second, no reload needed.
 
-The row below picks a mode for the site you're on, so YouTube can stay Dark while everything else follows Omarchy. `Alt + Shift + O` flips the current site between its theme and Normal. Images and video are never touched.
+The row below picks a mode for the site you're on, so YouTube can stay Dark while everything else follows Omarchy. `Alt + Shift + O` flips the current site between its theme and Normal, and `Alt + Shift + U` does the same for every site. Images and video are never touched. The popup uses your Omarchy font and follows font changes too.
+
+The page restyling runs on [Dark Reader](https://darkreader.org)'s engine (MIT) and its list of per-site fixes, with Omarchy's palette picking every color. If the Dark Reader extension is also installed, Omareader offers to turn it off, since two extensions restyling the same page fight each other.
 
 Like the extensions above, it gets your theme's colors through a small native messaging host, and it's Chromium-family only.
 

@@ -298,7 +298,24 @@
     const sites = {};
     for (const h of Array.isArray(s.disabledSites) ? s.disabledSites : []) if (siteKey(h)) sites[siteKey(h)] = 'normal';
     for (const [h, m] of Object.entries(s.sites || {})) if (siteKey(h) && MODES.includes(m)) sites[siteKey(h)] = m;
-    return { mode: modeOf(s), sites: Object.fromEntries(Object.entries(sites).sort(([a], [b]) => (a < b ? -1 : 1))) };
+    const out = { mode: modeOf(s), sites: Object.fromEntries(Object.entries(sites).sort(([a], [b]) => (a < b ? -1 : 1))) };
+    // The themed mode Alt+Shift+U goes back to after turning every site Normal.
+    if (s.lastMode === 'dark' || s.lastMode === 'omarchy') out.lastMode = s.lastMode;
+    return out;
+  }
+
+  // Sets the mode for all sites, remembering the last themed one.
+  function withMode(settings, mode) {
+    const s = normalizeSettings(settings);
+    if (!MODES.includes(mode)) return s;
+    return normalizeSettings({ ...s, mode, lastMode: mode === 'normal' ? s.lastMode : mode });
+  }
+
+  // The all-sites shortcut: every site Normal, or back to the last themed mode.
+  function toggleAll(settings) {
+    const s = normalizeSettings(settings);
+    if (s.mode !== 'normal') return normalizeSettings({ ...s, mode: 'normal', lastMode: s.mode });
+    return withMode(s, s.lastMode || 'omarchy');
   }
 
   // Sets (or with 'default', clears) a site's override.
@@ -320,7 +337,7 @@
   }
 
   root.OmareaderTheme = {
-    normalize, createMapper, modeOf, siteKey, siteModeOf, normalizeSettings, withSiteMode, toggleSite,
+    normalize, createMapper, modeOf, siteKey, siteModeOf, normalizeSettings, withMode, withSiteMode, toggleSite, toggleAll,
     MODES, FALLBACK, DARK, HUES,
   };
 })(globalThis);
